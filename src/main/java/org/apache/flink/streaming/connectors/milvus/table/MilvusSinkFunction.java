@@ -5,6 +5,7 @@ import io.milvus.client.MilvusServiceClient;
 import io.milvus.param.ConnectParam;
 import io.milvus.param.dml.InsertParam;
 import lombok.extern.slf4j.Slf4j;
+import org.apache.commons.collections.CollectionUtils;
 import org.apache.flink.configuration.Configuration;
 import org.apache.flink.configuration.ReadableConfig;
 import org.apache.flink.streaming.api.functions.sink.RichSinkFunction;
@@ -12,6 +13,8 @@ import org.apache.flink.table.connector.sink.DynamicTableSink;
 import org.apache.flink.table.data.GenericArrayData;
 import org.apache.flink.table.data.RowData;
 import org.apache.flink.table.types.DataType;
+import org.apache.flink.table.types.logical.ArrayType;
+import org.apache.flink.table.types.logical.LogicalType;
 import org.apache.flink.table.types.logical.LogicalTypeRoot;
 import org.apache.flink.table.types.logical.RowType;
 import org.apache.flink.types.Row;
@@ -25,14 +28,24 @@ public class MilvusSinkFunction extends RichSinkFunction<RowData> {
 
     private final DynamicTableSink.DataStructureConverter converter;
     private final ReadableConfig readableConfig;
-    private DataType dataType;
+
     private RowType logicalType;
-    private HashMap<Integer, String> fields;
+    private final List<String> fieldNames;
+
+    private long lastInvokeTime;
+    private final List<RowData> cache = new ArrayList<>();
+
+
+    private static int MAX_CACHE_SIZE;
+
+    private static long CACHE_INTERVAL;
 
     public MilvusSinkFunction(DynamicTableSink.DataStructureConverter converter, ReadableConfig readableConfig, DataType dataType) {
+
         this.converter = converter;
         this.readableConfig = readableConfig;
-        this.dataType = dataType;
+        this.logicalType = (RowType) dataType.getLogicalType();
+        this.fieldNames = logicalType.getFieldNames();
 
     }
 
@@ -40,88 +53,99 @@ public class MilvusSinkFunction extends RichSinkFunction<RowData> {
     @Override
     public void open(Configuration parameters) throws Exception {
         super.open(parameters);
-        logicalType = (RowType) dataType.getLogicalType();
-        fields = new HashMap<>();
-        List<RowType.RowField> rowFields = logicalType.getFields();
-        int size = rowFields.size();
-        for(int i = 0; i < size; i++) {
-            fields.put(i, rowFields.get(i).getName());
-        }
 
         ConnectParam connectParam = ConnectParam.newBuilder()
                 .withHost(readableConfig.get(ConfigOptionUtil.HOST))
                 .withPort(readableConfig.get(ConfigOptionUtil.PORT))
                 .build();
         client = new MilvusServiceClient(connectParam);
+        lastInvokeTime = System.currentTimeMillis();
+        MAX_CACHE_SIZE = readableConfig.get(ConfigOptionUtil.MAX_INSERT_CACHE_SIZE);
+        CACHE_INTERVAL = readableConfig.get(ConfigOptionUtil.MAX_INSERT_CACHE_TIME_INTERVAL);
+
     }
 
-//    @Override
-//    public void invoke(List<Map<String, Object>> docs, Context context) throws Exception {
-//        if(CollectionUtils.isEmpty(docs)) {
-//            return;
-//        }
-//        Set<String> fieldSet = docs.get(0).keySet();
-//        Map<String, List<Object>> fieldValues = new HashMap<>();
-//        for(Map<String, Object> doc : docs) {
-//            for(String fieldName : fieldSet) {
-//                if(fieldValues.get(fieldName) == null) {
-//                    List<Object> values = new ArrayList<>();
-//                    fieldValues.put(fieldName, values);
-//                }
-//
-//                fieldValues.get(fieldName).add(doc.get(fieldName));
-//            }
-//        }
-//
-//        List<InsertParam.Field> fieldList = new ArrayList<>();
-//        for(Map.Entry<String, List<Object>> entry : fieldValues.entrySet()) {
-//            InsertParam.Field field = new InsertParam.Field(entry.getKey(), entry.getValue());
-//            fieldList.add(field);
-//        }
-//
-//        InsertParam insertParam = InsertParam.newBuilder()
-//                .withCollectionName(readableConfig.get(ConfigOptionUtil.COLL_NAME))
-//                .withFields(fieldList)
-//                .withPartitionName(readableConfig.get(ConfigOptionUtil.PARTITION_NAME))
-//                .build();
-//
-//        client.insert(insertParam);
-//    }
 
     @Override
     public void invoke(RowData rowData, Context context) {
-        Row data = (Row) converter.toExternal(rowData);
-        List<InsertParam.Field> fieldList = new ArrayList<>();
-        for(Map.Entry<Integer, String> entry : fields.entrySet()) {
-            int index = entry.getKey();
-            String fieldName = entry.getValue();
-            Object fieldData = data.getField(index);
-            LogicalTypeRoot typeRoot  = logicalType.getFields().get(index).getType().getTypeRoot();
-            InsertParam.Field insertField;
-            if(LogicalTypeRoot.ARRAY.equals(typeRoot)) {
-                Float[] array = (Float[])fieldData;
-                List<Float> vector = Arrays.asList(array);
-                List<List<Float>> abc = new ArrayList<>();
-                abc.add(vector);
-                insertField = new InsertParam.Field(fieldName, abc);
-            } else {
-                insertField = new InsertParam.Field(fieldName, Arrays.asList(fieldData));
+
+        cache.add(rowData);
+        final long currentTime = System.currentTimeMillis();
+        final long interval = currentTime - lastInvokeTime;
+
+        if(cache.size() >= MAX_CACHE_SIZE || interval >= CACHE_INTERVAL) {
+            if(CollectionUtils.isEmpty(cache)) {
+                return;
             }
-            fieldList.add(insertField);
-        }
-        String collectionName = readableConfig.get(ConfigOptionUtil.COLL_NAME);
-        String partitionName = readableConfig.get(ConfigOptionUtil.PARTITION_NAME);
-        InsertParam.Builder insertParamBuilder = InsertParam.newBuilder()
-                .withCollectionName(collectionName)
-                .withFields(fieldList);
+            //handle cache data
+            final Map<String, InsertParam.Field> insertFieldMap = new HashMap<>();
+            for(String fieldName : fieldNames) {
+                InsertParam.Field insertField= new InsertParam.Field(fieldName, new ArrayList<>());
+                insertFieldMap.put(fieldName, insertField);
+            }
+            for(RowData cacheData : cache) {
+                appendFieldMap(cacheData, insertFieldMap);
+            }
+            List<InsertParam.Field> insertFieldList = new ArrayList<>(insertFieldMap.values());
 
-        if(!StringUtils.isEmpty(partitionName)) {
-            insertParamBuilder.withPartitionName(partitionName);
-        }
-        InsertParam insertParam = insertParamBuilder.build();
+            //build insertParam
+            String collectionName = readableConfig.get(ConfigOptionUtil.COLLECTION);
+            String partitionName = readableConfig.get(ConfigOptionUtil.PARTITION);
+            InsertParam.Builder insertParamBuilder = InsertParam.newBuilder()
+                    .withCollectionName(collectionName)
+                    .withFields(insertFieldList);
 
-        client.insert(insertParam);
+            if(!StringUtils.isEmpty(partitionName)) {
+                insertParamBuilder.withPartitionName(partitionName);
+            }
+            InsertParam insertParam = insertParamBuilder.build();
+
+            //insert
+            client.insert(insertParam);
+
+            //reset
+            cache.clear();
+            lastInvokeTime = currentTime;
+        }
+
+
     }
+
+
+    public void appendFieldMap(RowData rowData, Map<String, InsertParam.Field> insertFieldMap) {
+        Row data = (Row) converter.toExternal(rowData);
+        for(String fieldName : fieldNames) {
+            int index = logicalType.getFieldIndex(fieldName);
+            Object fieldData = data.getField(fieldName);
+            List fields = insertFieldMap.get(fieldName).getValues();
+            LogicalType rowFieldType = logicalType.getFields().get(index).getType();
+            LogicalTypeRoot typeRoot  = rowFieldType.getTypeRoot();
+            if(LogicalTypeRoot.ARRAY.equals(typeRoot)) {
+                LogicalTypeRoot elementType = ((ArrayType)logicalType.getFields().get(index).getType()).getElementType().getTypeRoot();
+                switch (elementType) {
+                    case FLOAT:
+                        addArrayField(fieldData, (List<List<Float>>) fields);
+                        break;
+                    case BINARY:
+                        addArrayField(fieldData, (List<List<Byte>>) fields);
+                        break;
+                    default:
+                        log.error("could not handle this Element type [{}]", elementType);
+                        break;
+                }
+            } else {
+                ((List<Object>)fields).add(fieldData);
+            }
+
+        }
+    }
+
+    public <T> void addArrayField(Object fieldData, List<List<T>> fields) {
+       T[] array = (T[])fieldData;
+       List<T> vector = Arrays.asList(array);
+       fields.add(vector);
+    }
+
 
     @Override
     public void close() throws Exception {

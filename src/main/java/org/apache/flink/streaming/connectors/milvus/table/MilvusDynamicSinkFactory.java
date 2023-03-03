@@ -46,8 +46,10 @@ public class MilvusDynamicSinkFactory implements DynamicTableSinkFactory {
     @Override
     public Set<ConfigOption<?>> optionalOptions() {
         Set<ConfigOption<?>> options = new HashSet<>();
-        options.add(ConfigOptionUtil.COLL_NAME);
-        options.add(ConfigOptionUtil.PARTITION_NAME);
+        options.add(ConfigOptionUtil.COLLECTION);
+        options.add(ConfigOptionUtil.PARTITION);
+        options.add(ConfigOptionUtil.MAX_INSERT_CACHE_SIZE);
+        options.add(ConfigOptionUtil.MAX_INSERT_CACHE_TIME_INTERVAL);
         return options;
     }
 }

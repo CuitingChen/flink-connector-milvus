@@ -21,17 +21,31 @@ public class ConfigOptionUtil {
                     .withDescription(
                             "milvus port");
 
-    public static final ConfigOption<String> COLL_NAME =
-            key("collName")
+    public static final ConfigOption<String> COLLECTION =
+            key("collection")
                     .stringType()
                     .noDefaultValue()
                     .withDescription(
                             "collection name");
 
-    public static final ConfigOption<String> PARTITION_NAME =
-            key("partitionName")
+    public static final ConfigOption<String> PARTITION =
+            key("partition")
                     .stringType()
                     .noDefaultValue()
                     .withDescription(
                             "partition name");
+
+    public static final ConfigOption<Integer> MAX_INSERT_CACHE_SIZE =
+            key("maxInsertCacheSize")
+                    .intType()
+                    .defaultValue(2000)
+                    .withDescription(
+                            "max cache size to insert");
+
+    public static final ConfigOption<Long> MAX_INSERT_CACHE_TIME_INTERVAL =
+            key("maxInsertCacheTimeInterval")
+                    .longType()
+                    .defaultValue(5000L)
+                    .withDescription(
+                            "max cache time interval to insert");
 }

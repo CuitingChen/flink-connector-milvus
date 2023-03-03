@@ -6,7 +6,7 @@
 
     <groupId>cn.ac.ict</groupId>
     <artifactId>milvus-connector</artifactId>
-    <version>1.11</version>
+    <version>1.13</version>
 
     <properties>
         <java.version>11</java.version>
